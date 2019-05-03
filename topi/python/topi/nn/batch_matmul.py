@@ -20,7 +20,7 @@ from __future__ import absolute_import as _abs
 import tvm
 from ..util import get_const_tuple
 
-
+@tvm.target.override_native_generic_func("batch_matmul")
 def batch_matmul(x, y):
     """Computes batch matrix multiplication of `x` and `y` when `x` and `y` are
     data in batch.

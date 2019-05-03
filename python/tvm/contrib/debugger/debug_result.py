@@ -207,7 +207,7 @@ class DebugResult(object):
     def display_debug_result(self):
         """Displays the debugger result"
         """
-        header = ["Node Name", "Ops", "Time(us)", "Time(%)", "Shape", "Inputs", "Outputs"]
+        header = ["Node_Name", "Ops", "Time(us)", "Time(%)", "Shape", "Inputs", "Outputs"]
         lines = ["---------", "---", "--------", "-------", "-----", "------", "-------"]
         eid = 0
         data = []

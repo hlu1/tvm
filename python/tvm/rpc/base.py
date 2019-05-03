@@ -164,6 +164,8 @@ def connect_with_retry(addr, timeout=60, retry_period=5):
     while True:
         try:
             sock = socket.socket(get_addr_family(addr), socket.SOCK_STREAM)
+            if addr[0] == "localhost":
+                addr = ("127.0.0.1", addr[1])
             sock.connect(addr)
             return sock
         except socket.error as sock_err:

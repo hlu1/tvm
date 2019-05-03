@@ -23,7 +23,7 @@ from .. import generic
 from ..util import traverse_inline, get_const_tuple, get_max_power2_factor
 
 
-@generic.schedule_batch_matmul.register(["cpu"])
+# @generic.schedule_batch_matmul.register(["cpu"])
 def schedule_batch_matmul(outs):
     """Schedule for batch_matmul
 

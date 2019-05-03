@@ -66,6 +66,11 @@ def schedule_dense(attrs, outputs, target):
         return topi.generic.schedule_dense(outputs)
 
 
+@reg.register_alter_op_layout("dense")
+def alter_conv2d_layout(attrs, inputs, tinfos):
+    return topi.nn.dense_alter_layout(attrs, inputs, tinfos)
+
+
 reg.register_pattern("nn.dense", reg.OpPattern.OUT_ELEMWISE_FUSABLE)
 
 
@@ -84,6 +89,16 @@ def schedule_batch_matmul(attrs, outputs, target):
 
 
 reg.register_pattern("nn.batch_matmul", reg.OpPattern.OUT_ELEMWISE_FUSABLE)
+
+
+# batch_gather
+@reg.register_compute("nn.batch_gather")
+def compute_batch_gather(attrs, inputs, out_type, target):
+    """Compute definition of batch_gather"""
+    return [topi.nn.batch_gather(inputs[0], inputs[1])]
+
+reg.register_schedule("nn.batch_gather", schedule_injective)
+reg.register_pattern("nn.batch_gather", reg.OpPattern.INJECTIVE)
 
 
 # conv2d

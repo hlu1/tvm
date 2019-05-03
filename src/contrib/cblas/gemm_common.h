@@ -27,6 +27,8 @@
 #include <tvm/runtime/registry.h>
 #include <tvm/runtime/util.h>
 #include <algorithm>
+#include <tvm/runtime/registry.h>
+#include <tvm/runtime/util.h>
 
 namespace tvm {
 namespace contrib {

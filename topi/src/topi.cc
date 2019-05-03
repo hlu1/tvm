@@ -49,6 +49,8 @@
 #include <topi/nn/local_response_norm.h>
 #include <topi/nn/batch_matmul.h>
 
+#include <topi/nn/batch_gather.h>
+
 #include <topi/vision/reorg.h>
 #include <topi/image/resize.h>
 #include <topi/generic/default.h>
@@ -421,6 +423,12 @@ TVM_REGISTER_GLOBAL("topi.nn.bias_add")
 TVM_REGISTER_GLOBAL("topi.nn.batch_matmul")
 .set_body([](TVMArgs args, TVMRetValue *rv) {
   *rv = nn::batch_matmul(args[0], args[1]);
+  });
+
+/* Ops from nn/batch_gather.h */
+TVM_REGISTER_GLOBAL("topi.nn.batch_gather")
+.set_body([](TVMArgs args, TVMRetValue *rv) {
+  *rv = nn::batch_gather(args[0], args[1]);
   });
 
 /* Ops from nn/dilate.h */

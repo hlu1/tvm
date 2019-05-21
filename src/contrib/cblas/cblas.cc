@@ -133,8 +133,25 @@ struct CblasDgemmBatchOp {
   }
 };
 
+struct CblasDgemmBatchIterativeOp {
+  typedef double TDatatype;
+  void operator()(int batch_size, bool ta, bool tb, int M, int N, int K, double alpha, double* A,
+                  int a_stride, int lda, double* B, int b_stride, int ldb, double beta, double* C,
+                  int c_stride, int ldc) {
+    CBLAS_TRANSPOSE trans_a = BooleanToTranspose(ta);
+    CBLAS_TRANSPOSE trans_b = BooleanToTranspose(tb);
+    for (int i = 0; i < batch_size; ++i) {
+      cblas_dgemm(CblasColMajor, trans_a, trans_b, M, N, K, alpha, A, lda, B, ldb, beta, C, ldc);
+      A += a_stride;
+      B += b_stride;
+      C += c_stride;
+    }
+  }
+};
+
 // matrix multiplication for row major
-TVM_REGISTER_GLOBAL("tvm.contrib.cblas.matmul").set_body([](TVMArgs args, TVMRetValue* ret) {
+TVM_REGISTER_GLOBAL("tvm.contrib.cblas.matmul")
+.set_body([](TVMArgs args, TVMRetValue* ret) {
   DLTensor* A = args[0];
   CHECK(TypeMatch(A->dtype, kDLFloat, 32) || TypeMatch(A->dtype, kDLFloat, 64));
 
@@ -144,7 +161,8 @@ TVM_REGISTER_GLOBAL("tvm.contrib.cblas.matmul").set_body([](TVMArgs args, TVMRet
     CallGemm(args, ret, CblasDgemmOp());
 });
 
-TVM_REGISTER_GLOBAL("tvm.contrib.cblas.batch_matmul").set_body([](TVMArgs args, TVMRetValue* ret) {
+TVM_REGISTER_GLOBAL("tvm.contrib.cblas.batch_matmul")
+.set_body([](TVMArgs args, TVMRetValue* ret) {
   DLTensor* A = args[0];
   CHECK(TypeMatch(A->dtype, kDLFloat, 32) || TypeMatch(A->dtype, kDLFloat, 64));
   if (TypeMatch(A->dtype, kDLFloat, 32)) {
@@ -155,14 +173,14 @@ TVM_REGISTER_GLOBAL("tvm.contrib.cblas.batch_matmul").set_body([](TVMArgs args, 
 });
 
 TVM_REGISTER_GLOBAL("tvm.contrib.cblas.batch_matmul_iterative")
-    .set_body([](TVMArgs args, TVMRetValue* ret) {
-      DLTensor* A = args[0];
-      CHECK(TypeMatch(A->dtype, kDLFloat, 32) || TypeMatch(A->dtype, kDLFloat, 64));
-      if (TypeMatch(A->dtype, kDLFloat, 32)) {
-        CallBatchGemm(args, ret, CblasSgemmBatchIterativeOp());
-      } else {
-        LOG(FATAL) << "Unhandled type";
-      }
-    });
+.set_body([](TVMArgs args, TVMRetValue* ret) {
+  DLTensor* A = args[0];
+  CHECK(TypeMatch(A->dtype, kDLFloat, 32) || TypeMatch(A->dtype, kDLFloat, 64));
+  if (TypeMatch(A->dtype, kDLFloat, 32)) {
+    CallBatchGemm(args, ret, CblasSgemmBatchIterativeOp());
+  } else {
+    CallBatchGemm(args, ret, CblasDgemmBatchIterativeOp());
+  }
+});
 }  // namespace contrib
 }  // namespace tvm

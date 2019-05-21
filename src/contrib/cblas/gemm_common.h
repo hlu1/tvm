@@ -24,6 +24,8 @@
  */
 #pragma once
 
+#include <tvm/runtime/registry.h>
+#include <tvm/runtime/util.h>
 #include <algorithm>
 #include <tvm/runtime/registry.h>
 #include <tvm/runtime/util.h>
@@ -176,5 +178,5 @@ inline void CallBatchGemm(TVMArgs args, TVMRetValue *ret, TBatchGemmOp op) {
      static_cast<float>(beta), C_data, C_size, ColumnStride3D(C));
 }
 
-} // namespace contrib
-} // namespace tvm
+}  // namespace contrib
+}  // namespace tvm

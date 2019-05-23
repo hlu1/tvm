@@ -1,3 +1,22 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+
 /*!
  *  Copyright (c) 2018 by Contributors
  * \file graph_runtime_debug.cc
@@ -6,6 +25,7 @@
 #include <tvm/runtime/registry.h>
 #include <tvm/runtime/ndarray.h>
 #include <chrono>
+#include <sstream>
 #include "../graph_runtime.h"
 
 namespace tvm {
@@ -50,10 +70,10 @@ class GraphRuntimeDebug : public GraphRuntime {
             the parameters `number` will be dynamically adjusted to meet the
             minimum duration requirement of one `repeat`.
    */
-  void RunIndividual(int number, int repeat, int min_repeat_ms) {
+  std::string RunIndividual(int number, int repeat, int min_repeat_ms) {
     // warmup run
     GraphRuntime::Run();
-
+    std::ostringstream os;
     std::vector<double> time_per_op(op_execs_.size(), 0);
     for (int i = 0; i < repeat; ++i) {
       std::chrono::time_point<
@@ -91,10 +111,16 @@ class GraphRuntimeDebug : public GraphRuntime {
       for (size_t index = 0; index < time_per_op.size(); index++) {
         if (op_execs_[index]) {
           time_per_op[index] /= number;
-          LOG(INFO) << "Op #" << op++ << ": " << time_per_op[index] << " ms/iter";
+          LOG(INFO) << "Op #" << op++ << " " << GetNodeName(index) << ": "
+            << time_per_op[index] << " ms/iter";
         }
       }
+
+      for (size_t index = 0; index < time_per_op.size(); index++) {
+        os << time_per_op[index] << ",";
+      }
     }
+    return os.str();
   }
 
   /*!
@@ -186,7 +212,7 @@ PackedFunc GraphRuntimeDebug::GetFunction(
       CHECK_GT(number, 0);
       CHECK_GT(repeat, 0);
       CHECK_GE(min_repeat_ms, 0);
-      this->RunIndividual(number, repeat, min_repeat_ms);
+      *rv = this->RunIndividual(number, repeat, min_repeat_ms);
     });
   } else {
     return GraphRuntime::GetFunction(name, sptr_to_self);

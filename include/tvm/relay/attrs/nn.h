@@ -354,6 +354,7 @@ struct AdaptivePool2DAttrs : public tvm::AttrsNode<AdaptivePool2DAttrs> {
 struct DenseAttrs : public tvm::AttrsNode<DenseAttrs> {
   IndexExpr units;
   DataType out_dtype;
+  bool transposed;
 
   TVM_DECLARE_ATTRS(DenseAttrs, "relay.attrs.DenseAttrs") {
     TVM_ATTR_FIELD(units)
@@ -363,6 +364,10 @@ struct DenseAttrs : public tvm::AttrsNode<DenseAttrs> {
     TVM_ATTR_FIELD(out_dtype)
         .set_default(NullValue<DataType>())
         .describe("Output data type, set to explicit type under mixed precision setting");
+
+    TVM_ATTR_FIELD(transposed)
+        .set_default(false)
+        .describe("Flag to indicate whether weight is transposed");
   }
 };
 

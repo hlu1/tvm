@@ -56,7 +56,8 @@ def compute_dense(attrs, inputs, out_type, target):
     """Compute definition of dense"""
     out_dtype = attrs.out_dtype
     out_dtype = inputs[0].dtype if out_dtype == "" else out_dtype
-    return [topi.nn.dense(inputs[0], inputs[1], None, out_dtype)]
+    transposed = attrs.transposed
+    return [topi.nn.dense(inputs[0], inputs[1], None, out_dtype=out_dtype, transposed=transposed)]
 
 
 @reg.register_schedule("nn.dense")
@@ -65,6 +66,9 @@ def schedule_dense(attrs, outputs, target):
     with target:
         return topi.generic.schedule_dense(outputs)
 
+@reg.register_alter_op_layout("nn.dense")
+def alter_dense_layout(attrs, inputs, tinfos):
+    return topi.nn.dense_alter_layout(attrs, inputs, tinfos)
 
 reg.register_pattern("nn.dense", reg.OpPattern.OUT_ELEMWISE_FUSABLE)
 

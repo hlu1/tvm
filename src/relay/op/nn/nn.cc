@@ -114,6 +114,7 @@ bool DenseRel(const Array<Type>& types,
 
   const DenseAttrs* param = attrs.as<DenseAttrs>();
   CHECK(param != nullptr);
+  const bool transposed = param->transposed;
 
   CHECK(static_cast<int>(data->shape.size()) != 0);
 
@@ -122,13 +123,22 @@ bool DenseRel(const Array<Type>& types,
     Array<tvm::Expr> dshape = data->shape;
     // validate the weight shape is proper if defined
     // Assign weight type
-    Array<IndexExpr> wshape({param->units, dshape[dshape.size() - 1]});
-    reporter->Assign(types[1], TensorTypeNode::make(wshape, data->dtype));
+    if (transposed) {
+      Array<IndexExpr> wshape({dshape[dshape.size() - 1], param->units});
+      reporter->Assign(types[1], TensorTypeNode::make(wshape, data->dtype));
+    } else {
+      Array<IndexExpr> wshape({param->units, dshape[dshape.size() - 1]});
+      reporter->Assign(types[1], TensorTypeNode::make(wshape, data->dtype));
+    }
     oshape.Set((oshape.size() - 1), param->units);
   } else {
     if (weight == nullptr) return false;
     Array<tvm::Expr> wshape = weight->shape;
-    oshape.Set((oshape.size() - 1), wshape[0]);
+    if (transposed) {
+      oshape.Set((oshape.size() - 1), wshape[1]);
+    } else {
+      oshape.Set((oshape.size() - 1), wshape[0]);
+    }
   }
 
   DataType out_dtype = param->out_dtype;
@@ -145,12 +155,37 @@ bool DenseRel(const Array<Type>& types,
 Expr MakeDense(Expr data,
                Expr weight,
                IndexExpr units,
-               DataType out_dtype) {
+               DataType out_dtype,
+               bool transposed) {
   auto attrs = make_node<DenseAttrs>();
   attrs->units = units;
   attrs->out_dtype = out_dtype;
+  attrs->transposed = transposed;
   static const Op& op = Op::Get("nn.dense");
   return CallNode::make(op, {data, weight}, Attrs(attrs), {});
+}
+
+/*! \brief take arbitrary input layout and copy to output */
+inline Array<Array<Layout> > DenseArbitraryLayout(const Attrs& attrs,
+                                                  const Array<Layout>& new_in_layouts,
+                                                  const Array<Layout>& old_in_layouts,
+                                                  const Array<Array<IndexExpr>> &old_in_shapes) {
+  Layout ret;
+  if (new_in_layouts.defined()) {
+    CHECK_GE(new_in_layouts.size(), 1);
+    ret = new_in_layouts[0];
+  } else {
+    for (size_t i = 0; i < old_in_layouts.size(); ++i) {
+      if (old_in_layouts[i].defined()) {
+        ret = old_in_layouts[i];
+        break;
+      } else {
+        ret = Layout("NC");
+      }
+    }
+  }
+
+  return Array<Array<Layout> >{Array<Layout>(old_in_layouts.size(), ret), {ret}};
 }
 
 
@@ -171,6 +206,7 @@ RELAY_REGISTER_OP("nn.dense")
 .add_argument("data", "nD Tensor", "Input data.")
 .add_argument("weight", "2D Tensor", "Weight matrix.")
 .set_support_level(1)
+.set_attr<FInferCorrectLayout>("FInferCorrectLayout", DenseArbitraryLayout)
 .add_type_rel("Dense", DenseRel);
 
 // relay.leaky_relu

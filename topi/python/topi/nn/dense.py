@@ -19,7 +19,7 @@ from __future__ import absolute_import
 import tvm
 from .. import tag
 
-def dense_default(data, weight, bias=None, out_dtype=None):
+def dense_default(data, weight, bias=None, out_dtype=None, transposed=False):
     """The default implementation of dense in topi.
 
     Parameters
@@ -41,6 +41,7 @@ def dense_default(data, weight, bias=None, out_dtype=None):
     output : tvm.Tensor
         2-D with shape [batch, out_dim]
     """
+    assert not transposed
     assert len(data.shape) == 2 and len(weight.shape) == 2, \
         "only support 2-dim dense"
     if bias is not None:
@@ -62,7 +63,7 @@ def dense_default(data, weight, bias=None, out_dtype=None):
 
 
 @tvm.target.override_native_generic_func("dense")
-def dense(data, weight, bias=None, out_dtype=None):
+def dense(data, weight, bias=None, out_dtype=None, transposed=False):
     """Applies a linear transformation: :math:`Y = XW^T + b`.
 
     Parameters
@@ -84,4 +85,8 @@ def dense(data, weight, bias=None, out_dtype=None):
     output : tvm.Tensor
         2-D with shape [batch, out_dim]
     """
-    return dense_default(data, weight, bias, out_dtype)
+    return dense_default(data, weight, bias, out_dtype, transposed)
+
+@tvm.target.generic_func
+def dense_alter_layout(attrs, inputs, tinfos):
+    return None

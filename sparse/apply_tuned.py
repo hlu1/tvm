@@ -16,6 +16,7 @@ import batch_matmul
 
 TARGETS = dict(
     skl="llvm -mcpu=skylake-avx512 -target=x86_64-linux-gnu",
+    rtp="llvm -mcpu=skylake-avx512 -target=x86_64-linux-gnu",
     dev="llvm -mcpu=skylake -target=x86_64-linux-gnu",
     mac="llvm -mcpu=core-avx2",
 )
@@ -107,11 +108,14 @@ def run(
     module.set_input(**new_params)
     ftimer = module.module.time_evaluator("run", ctx, num_iter)
     for _ in range(num_cycles):
+        # warmup
+        ftimer()
+        # benchmark run
         prof_res = ftimer()
         print("TVM time: ", prof_res.mean)
         time.sleep(1)
     if layerwise:
-        module.run()
+        module.run_individual(num_iter, 1, 0)
 
 
 if __name__ == "__main__":

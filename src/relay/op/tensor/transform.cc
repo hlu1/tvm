@@ -28,7 +28,8 @@
 #include <tvm/expr_operator.h>
 #include <tvm/ir.h>
 #include <tvm/data_layout.h>
-#include <topi/transform.h>
+// #include <topi/transform.h>
+#include <topi/contrib/concat.h>
 #include <topi/elemwise.h>
 #include <topi/broadcast.h>
 #include <topi/reduction.h>
@@ -265,7 +266,8 @@ Array<Tensor> ConcatenateCompute(const Attrs& attrs,
                           const Target& target) {
   const ConcatenateAttrs *param = attrs.as<ConcatenateAttrs>();
   CHECK(param != nullptr);
-  return { topi::concatenate(inputs, param->axis) };
+  return { topi::contrib::concatenate(inputs, param->axis) };
+  // return { topi::concatenate(inputs, param->axis) };
 }
 
 Array<Array<Layout>> ConcatenateLayout(

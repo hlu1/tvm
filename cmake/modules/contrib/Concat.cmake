@@ -1,0 +1,4 @@
+if(USE_CONCAT)
+  file(GLOB CONCAT_CONTRIB_SRC src/contrib/concat/*.cc)
+  list(APPEND RUNTIME_SRCS ${CONCAT_CONTRIB_SRC})
+endif(USE_CONCAT)

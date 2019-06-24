@@ -19,6 +19,7 @@ import batch_matmul
 
 TARGETS = dict(
     skl="llvm -mcpu=skylake-avx512 -target=x86_64-linux-gnu",
+    rtp="llvm -mcpu=skylake-avx512 -target=x86_64-linux-gnu",
     dev="llvm -mcpu=skylake -target=x86_64-linux-gnu",
     mac="llvm -mcpu=core-avx2",
 )

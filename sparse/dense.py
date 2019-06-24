@@ -47,8 +47,9 @@ def dense(cfg, data, weight, bias=None, out_dtype=None, transposed=False):
     batch, in_dim = get_const_tuple(data.shape)
     out_dim, _ = get_const_tuple(weight.shape)
     cfg.define_knob('blas', ALGORITHMS)
-    cfg.define_split("tile_y", cfg.axis(out_dim), policy="candidate", num_outputs=2,
-                     candidate=[(in_dim / (8 * i), 8 * i) for i in range(1, 16)])
+    if cfg['blas'].val == TVM or cfg['blas'].val == TVM_PRETRANSPOSED:
+        cfg.define_split("tile_y", cfg.axis(out_dim), policy="candidate", num_outputs=2,
+                        candidate=[(in_dim / (8 * i), 8 * i) for i in range(1, 16)])
 
     f = [dense_direct, dense_blas, dense_blas_pretranspose, dense_direct_pretranspose][cfg['blas'].val]
     matmul = f(cfg, data, weight, bias)
@@ -120,11 +121,11 @@ def schedule_dense_tvm(s, cfg, op, out):
     yo, yi = cfg["tile_y"].apply(s, C, y)
     s[C].reorder(x, yo, k, yi)
     s[C].vectorize(yi)
-    if op != out:
-        (x, y) = s[out].op.axis
-        yo, yi = cfg["tile_y"].apply(s, out, y)
-        s[out].vectorize(yi)
-        s[C].compute_at(s[out], yo)
+    # if op != out:
+    #     (x, y) = s[out].op.axis
+    #     yo, yi = cfg["tile_y"].apply(s, out, y)
+    #     s[out].vectorize(yi)
+    #     s[C].compute_at(s[out], yo)
 
 def schedule_dense_pretranspose_tvm(s, cfg, op, out):
     C = op.output(0)
@@ -136,7 +137,7 @@ def schedule_dense_pretranspose_tvm(s, cfg, op, out):
     k = s[C].op.reduce_axis[0]
     (M, N) = get_const_tuple(C.shape)
     K = get_const_int(k.dom.extent)
-    print("BLAS", M, N, K)
+
     xa = cfg.axis(M)
     ya = cfg.axis(N)
     ka = cfg.axis(K)

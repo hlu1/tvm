@@ -84,7 +84,7 @@ def schedule_concatenate(outs):
     # x = outs[0]
     s = tvm.create_schedule([x.op for x in outs])
     tvm.schedule.AutoInlineInjective(s)
-    s[outs[0].op].unroll(s[outs[0]].op.axis[-1])
+    # s[outs[0].op].unroll(s[outs[0]].op.axis[-1])
     # if len(s[x].op.axis) >= 5:
     #     fused = s[x].fuse(s[x].op.axis[0], s[x].op.axis[1], s[x].op.axis[2])
     #     vectorize(s, x, 64)

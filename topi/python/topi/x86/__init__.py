@@ -12,7 +12,7 @@ from .bitserial_conv2d import schedule_bitserial_conv2d
 from .bitserial_dense import schedule_bitserial_dense
 from .depthwise_conv2d import schedule_depthwise_conv2d_NCHWc
 # from .dense import _schedule_dense, _schedule_dense_pack, _schedule_dense_nopack
-from .batch_matmul import schedule_batch_matmul
+# from .batch_matmul import schedule_batch_matmul
 from .roi_align import roi_align_nchw
 from .conv2d_transpose import schedule_conv2d_transpose
-from .dense_cblas import *
+# from .dense_cblas import *

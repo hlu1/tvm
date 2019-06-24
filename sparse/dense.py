@@ -1,0 +1,284 @@
+# pylint: disable=invalid-name,unused-variable
+"""dense schedule on ARM Mali GPU"""
+
+from __future__ import absolute_import as _abs
+
+import tvm
+from tvm import autotvm, relay
+import copy
+from topi import generic, nn, tag
+from topi.util import traverse_inline, get_const_tuple, get_const_int
+import numpy as np
+
+from tvm.contrib import cblas
+
+[TVM, BLAS, BLAS_PRETRANSPOSED, TVM_PRETRANSPOSED] = ALGORITHMS = range(4)
+
+# todo handle dtype
+@autotvm.register_topi_compute(nn.dense, 'cpu', 'direct', override=True)
+def dense(cfg, data, weight, bias=None, out_dtype=None, transposed=False):
+    """The default implementation of dense in topi.
+
+    Parameters
+    ----------
+    data : tvm.Tensor
+        2-D with shape [batch, in_dim]
+
+    weight : tvm.Tensor
+        2-D with shape [out_dim, in_dim]
+
+    bias : tvm.Tensor, optional
+        1-D with shape [out_dim]
+
+    Returns
+    -------
+    output : tvm.Tensor
+        2-D with shape [batch, out_dim]
+    """
+    try:
+        assert not transposed
+    except:
+        import ipdb; ipdb.set_trace()
+    assert len(data.shape) == 2 and len(weight.shape) == 2, \
+        "only support 2-dim dense"
+    if bias is not None:
+        assert len(bias.shape) == 1
+
+    batch, in_dim = get_const_tuple(data.shape)
+    out_dim, _ = get_const_tuple(weight.shape)
+    cfg.define_knob('blas', ALGORITHMS)
+    cfg.define_split("tile_y", cfg.axis(out_dim), policy="candidate", num_outputs=2,
+                     candidate=[(in_dim / (8 * i), 8 * i) for i in range(1, 16)])
+
+    f = [dense_direct, dense_blas, dense_blas_pretranspose, dense_direct_pretranspose][cfg['blas'].val]
+    matmul = f(cfg, data, weight, bias)
+    if bias is not None:
+        matmul = tvm.compute(
+            (batch, out_dim),
+            lambda i, j: matmul[i, j] + bias[j],
+            name="bias_add",
+            tag=tag.BROADCAST
+        )
+    cfg.add_flop(2 * batch * in_dim * out_dim)
+    if bias is not None:
+        cfg.add_flop(batch * out_dim)
+    return matmul
+
+
+def dense_direct(cfg, data, weight, bias, out_dtype=None):
+    batch, in_dim = get_const_tuple(data.shape)
+    out_dim, _ = get_const_tuple(weight.shape)
+    k = tvm.reduce_axis((0, in_dim), name='k')
+
+    matmul = tvm.compute(
+        (batch, out_dim),
+        lambda i, j: tvm.sum(data[i, k] * weight[j, k], axis=k),
+        tag='dense',
+        name="matmul",
+    )
+    return matmul
+
+
+def dense_direct_pretranspose(cfg, data, weight, bias, out_dtype=None):
+    import topi
+    batch, in_dim = get_const_tuple(data.shape)
+    out_dim, _ = get_const_tuple(weight.shape)
+    k = tvm.reduce_axis((0, in_dim), name='k')
+    weight_T = topi.transpose(weight, [1, 0])
+    matmul = tvm.compute(
+        (batch, out_dim),
+        lambda i, j: tvm.sum(data[i, k] * weight_T[k, j], axis=k),
+        tag='dense_pretranspose',
+        name="matmul",
+    )
+    return matmul
+
+
+def dense_blas(cfg, data, weight, bias, out_dtype=None):
+    matmul = cblas.matmul(data, weight, transb=True, tag="dense_blas")
+    return matmul
+
+
+def dense_blas_pretranspose(cfg, data, weight, bias, out_dtype=None):
+    import topi
+    weight_T = topi.transpose(weight, [1, 0])
+    matmul = cblas.matmul(data, weight_T, transb=False, tag="dense_blas")
+    return matmul
+
+
+def schedule_dense_tvm(s, cfg, op, out):
+    C = op.output(0)
+    A, B = op.input_tensors
+    x, y = s[C].op.axis
+    k = s[C].op.reduce_axis[0]
+    (M, N) = get_const_tuple(C.shape)
+    K = get_const_int(k.dom.extent)
+    xa = cfg.axis(M)
+    ya = cfg.axis(N)
+    ka = cfg.axis(K)
+
+    yo, yi = cfg["tile_y"].apply(s, C, y)
+    s[C].reorder(x, yo, k, yi)
+    s[C].vectorize(yi)
+    if op != out:
+        (x, y) = s[out].op.axis
+        yo, yi = cfg["tile_y"].apply(s, out, y)
+        s[out].vectorize(yi)
+        s[C].compute_at(s[out], yo)
+
+def schedule_dense_pretranspose_tvm(s, cfg, op, out):
+    C = op.output(0)
+    A, B = op.input_tensors
+    if autotvm.GLOBAL_SCOPE.in_tuning:
+        s[B].pragma(s[B].op.axis[0], "debug_skip_region")
+
+    x, y = s[C].op.axis
+    k = s[C].op.reduce_axis[0]
+    (M, N) = get_const_tuple(C.shape)
+    K = get_const_int(k.dom.extent)
+    print("BLAS", M, N, K)
+    xa = cfg.axis(M)
+    ya = cfg.axis(N)
+    ka = cfg.axis(K)
+
+    yo, yi = cfg["tile_y"].apply(s, C, y)
+    s[C].reorder(x, yo, k, yi)
+    s[C].vectorize(yi)
+    assert type(op) == type(out)
+    if op != out:
+        (x, y) = s[out].op.axis
+        yo, yi = cfg["tile_y"].apply(s, out, y)
+        s[out].vectorize(yi)
+        s[C].compute_at(s[out], yo)
+
+
+
+@autotvm.register_topi_schedule(generic.schedule_dense, 'cpu', ['direct', 'pretransposed'], override=True)
+def schedule_dense(cfg, outs):
+    """Schedule for dense operator.
+
+    Parameters
+    ----------
+    cfg: ConfigEntity
+        The config entity for this template
+    outs: Array of Tensor
+        The computation graph description of dense
+        in the format of an array of tensors.
+
+    Returns
+    -------
+    s: Schedule
+        The computation schedule for dense.
+    """
+    outs = [outs] if isinstance(outs, tvm.tensor.Tensor) else outs
+    s = tvm.create_schedule([x.op for x in outs])
+
+    def _callback(op):
+        if op.tag == 'dense_blas':
+            data, weight = op.input_tensors
+            if autotvm.GLOBAL_SCOPE.in_tuning and cfg['blas'].val == BLAS_PRETRANSPOSED:
+                s[weight].pragma(s[weight].op.axis[0], "debug_skip_region")
+            if outs[0].op != op:
+                (_, y) = s[outs[0].op].op.axis
+                s[outs[0].op].vectorize(y)
+
+        if op.tag == 'dense':
+            schedule_dense_tvm(s, cfg, op, outs[0].op)
+        if op.tag == 'dense_pretranspose':
+            schedule_dense_pretranspose_tvm(s, cfg, op, outs[0].op)
+
+    # TODO: autotune this?
+    (_, CO) = get_const_tuple(outs[0].shape)
+    if CO != 1:
+        assert isinstance(
+            outs[0].op, tvm.tensor.ComputeOp) or isinstance(
+            outs[0].op, tvm.tensor.ExternOp)
+    traverse_inline(s, outs[0].op, _callback)
+
+    return s
+
+
+@autotvm.register_topi_compute(nn.dense, 'cpu', ['pretransposed'])
+def dense(cfg, data, weight, bias=None, out_dtype=None, transposed=False):
+    """The default implementation of dense in topi.
+
+    Parameters
+    ----------
+    data : tvm.Tensor
+        2-D with shape [batch, in_dim]
+
+    weight : tvm.Tensor
+        2-D with shape [out_dim, in_dim]
+
+    bias : tvm.Tensor, optional
+        1-D with shape [out_dim]
+
+    Returns
+    -------
+    output : tvm.Tensor
+        2-D with shape [batch, out_dim]
+    """
+    assert not transposed
+    assert len(data.shape) == 2 and len(weight.shape) == 2, \
+        "only support 2-dim dense"
+    if bias is not None:
+        assert len(bias.shape) == 1
+
+    batch, in_dim = get_const_tuple(data.shape)
+    _, out_dim = get_const_tuple(weight.shape)
+    assert cfg['blas'].val in (TVM_PRETRANSPOSED, BLAS_PRETRANSPOSED)
+    if cfg['blas'].val == BLAS_PRETRANSPOSED:
+        matmul = cblas.matmul(data, weight, transb=False, tag="dense_blas")
+    else:
+        k = tvm.reduce_axis((0, in_dim), name='k')
+        matmul = tvm.compute(
+            (batch, out_dim),
+            lambda i, j: tvm.sum(data[i, k] * weight[k, j], axis=k),
+            tag='dense_pretranspose',
+            name="matmul",
+        )
+
+    if bias is not None:
+        matmul = tvm.compute(
+            (batch, out_dim),
+            lambda i, j: matmul[i, j] + bias[j],
+            name="bias_add",
+            tag=tag.BROADCAST
+        )
+    return matmul
+
+@nn.dense_alter_layout.register("cpu")
+def dense_alter_layout(attrs, inputs, tinfo):
+    dispatch_ctx = autotvm.task.DispatchContext.current
+    target = tvm.target.current_target()
+
+    # query schedule and fallback if necessary
+    assert len(inputs) == 2
+    bias = None
+    out_dtype = "float32"
+    new_attrs = dict(attrs)
+    transposed = new_attrs["transposed"]
+    workload = autotvm.task.args_to_workload([tinfo[0], tinfo[1], bias, out_dtype, transposed], nn.dense)
+    cfg = dispatch_ctx.query(target, workload)
+    if cfg.is_fallback:
+        return None
+    if cfg['blas'].val not in (BLAS_PRETRANSPOSED, TVM_PRETRANSPOSED):
+        return None
+
+    data, weights = inputs[:2]
+    transposed_weights = relay.transpose(
+        weights,
+        axes=(1, 0),
+    )
+
+    weights_placeholder = tinfo[1]
+    transposed_weights_placeholder = tvm.placeholder((weights_placeholder.shape[1], weights_placeholder.shape[0]),
+                                                     dtype=weights_placeholder.dtype)
+    transposed_workload = autotvm.task.args_to_workload(
+        [tinfo[0], transposed_weights_placeholder, bias, out_dtype, transposed], nn.dense)
+    transposed_inputs = [inputs[0], transposed_weights]
+    transposed_cfg = copy.deepcopy(cfg)
+    transposed_cfg.template_key = "pretransposed"
+    dispatch_ctx.update(target, transposed_workload, transposed_cfg)
+
+    return relay.nn.dense(*transposed_inputs, **new_attrs)

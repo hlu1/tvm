@@ -19,7 +19,7 @@ from __future__ import absolute_import
 import tvm
 from .. import tag
 
-def dense_default(data, weight, bias=None, out_dtype=None):
+def dense_default(data, weight, bias=None, kernel_layout="OI", out_dtype=None):
     """The default implementation of dense in topi.
 
     Parameters
@@ -33,6 +33,9 @@ def dense_default(data, weight, bias=None, out_dtype=None):
     bias : tvm.Tensor, optional
         1-D with shape [out_dim]
 
+    kernel_layout : str, optional
+        Layout of weight tensor.
+
     out_dtype : str
         The output type. This is used for mixed precision.
 
@@ -43,6 +46,7 @@ def dense_default(data, weight, bias=None, out_dtype=None):
     """
     assert len(data.shape) == 2 and len(weight.shape) == 2, \
         "only support 2-dim dense"
+    assert kernel_layout == "OI"
     if bias is not None:
         assert len(bias.shape) == 1
     if out_dtype is None:
@@ -62,7 +66,7 @@ def dense_default(data, weight, bias=None, out_dtype=None):
 
 
 @tvm.target.override_native_generic_func("dense")
-def dense(data, weight, bias=None, out_dtype=None):
+def dense(data, weight, bias=None, kernel_layout="OI", out_dtype=None):
     """Applies a linear transformation: :math:`Y = XW^T + b`.
 
     Parameters
@@ -76,6 +80,9 @@ def dense(data, weight, bias=None, out_dtype=None):
     bias : tvm.Tensor, optional
         1-D with shape [out_dim]
 
+    kernel_layout : str, optional
+        Layout of weight tensor.
+
     out_dtype : str
         The output type. This is used for mixed precision.
 
@@ -84,4 +91,28 @@ def dense(data, weight, bias=None, out_dtype=None):
     output : tvm.Tensor
         2-D with shape [batch, out_dim]
     """
-    return dense_default(data, weight, bias, out_dtype)
+    return dense_default(data, weight, bias, kernel_layout, out_dtype)
+
+
+@tvm.target.generic_func
+def dense_alter_layout(attrs, inputs, tinfos, F):
+    """Change Dense layout.
+
+    Parameters
+    ----------
+    attrs : nnvm.top.AttrDict or tvm.attrs.Attrs
+        Attributes of current dense operation
+    inputs : nnvm.symbol or tvm.relay.Expr
+        Grouped input symbols
+    tinfos : list
+        Input shape and dtype
+    F : symbol
+        The context, can be either nnvm.sym or relay.op
+
+    Note
+    ----
+    Unlike other TOPI functions, this function operates on both graph level and operator level,
+    so we have to pass 'F' to make it support our two versions of graph IR, NNVM and Relay.
+    """
+    # not to change by default
+    return None

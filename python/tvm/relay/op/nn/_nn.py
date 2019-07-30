@@ -55,8 +55,9 @@ reg.register_pattern("nn.log_softmax", OpPattern.OPAQUE)
 def compute_dense(attrs, inputs, out_type, target):
     """Compute definition of dense"""
     out_dtype = attrs.out_dtype
+    kernel_layout = attrs.kernel_layout
     out_dtype = inputs[0].dtype if out_dtype == "" else out_dtype
-    return [topi.nn.dense(inputs[0], inputs[1], None, out_dtype)]
+    return [topi.nn.dense(inputs[0], inputs[1], None, kernel_layout, out_dtype)]
 
 
 @reg.register_schedule("nn.dense")
@@ -64,6 +65,13 @@ def schedule_dense(attrs, outputs, target):
     """Schedule definition of dense"""
     with target:
         return topi.generic.schedule_dense(outputs)
+
+
+@reg.register_alter_op_layout("nn.dense")
+def alter_op_layout_dense(attrs, inputs, tinfos):
+    """Alternate the layout of dense"""
+    from ... import op
+    return topi.nn.dense_alter_layout(attrs, inputs, tinfos, op)
 
 
 reg.register_pattern("nn.dense", reg.OpPattern.OUT_ELEMWISE_FUSABLE)

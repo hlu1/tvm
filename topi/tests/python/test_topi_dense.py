@@ -17,6 +17,7 @@
 """Test code for dense operator"""
 import numpy as np
 import tvm
+from tvm.autotvm.task.space import FallbackConfigEntity
 import topi
 import topi.testing
 from topi.util import get_const_tuple
@@ -24,7 +25,7 @@ from tvm.contrib.pickle_memoize import memoize
 
 from common import get_all_backend, Int8Fallback
 
-def verify_dense(batch, in_dim, out_dim, use_bias=True):
+def verify_dense(batch, in_dim, out_dim, use_bias=True, template='direct'):
     A = tvm.placeholder((batch, in_dim), name='A')
     B = tvm.placeholder((out_dim, in_dim), name='B')
     C = tvm.placeholder((out_dim,), name='C')
@@ -62,8 +63,11 @@ def verify_dense(batch, in_dim, out_dim, use_bias=True):
         f(a, b, c, d)
         tvm.testing.assert_allclose(d.asnumpy(), d_np, rtol=1e-5)
 
-    for device in get_all_backend():
-        check_device(device)
+    if template == 'direct':
+        for device in get_all_backend():
+            check_device(device)
+    else:
+        check_device('llvm')
 
 
 def verify_dense_int8(batch, in_dim, out_dim, use_bias=True):
@@ -114,11 +118,27 @@ def verify_dense_int8(batch, in_dim, out_dim, use_bias=True):
         check_device(device)
 
 
-def test_dense():
-    verify_dense(1, 1024, 1000, use_bias=True)
-    verify_dense(1, 1024, 1000, use_bias=False)
+class DenseFallbackContext(tvm.autotvm.FallbackContext):
+    def __init__(self, key):
+        super(DenseFallbackContext, self).__init__()
+        self._key = key
 
-    verify_dense(2, 1024, 1000, use_bias=True)
+    def _query_inside(self, target, workload):
+        key = (target, workload)
+        if key in self.memory:
+            return self.memory[key]
+        cfg = FallbackConfigEntity()
+        cfg.template_key = self._key
+        self.memory[key] = cfg
+        return cfg
+
+def test_dense():
+    for template in ['direct', 'direct_pack', 'direct_nopack', 'blas', 'blas_pretransposed']:
+        with DenseFallbackContext(template):
+            print(template)
+            verify_dense(1, 128, 100, use_bias=True, template=template)
+            verify_dense(1, 128, 100, use_bias=False, template=template)
+            verify_dense(2, 128, 100, use_bias=True, template=template)
 
 
 def test_dense_int8():

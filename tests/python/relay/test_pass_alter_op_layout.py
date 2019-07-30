@@ -577,6 +577,46 @@ def test_alter_layout_prelu():
     assert(analysis.alpha_equal(a, b))
 
 
+def test_alter_layout_dense():
+    """Test Dense operator"""
+    def before():
+        x = relay.var("x", shape=(16, 64))
+        weight = relay.var("weight", shape=(13, 64))
+        bias = relay.var("bias", shape=(13,))
+        y = relay.nn.dense(x, weight, units=13)
+        y = relay.nn.bias_add(y, bias, axis=1)
+        y = relay.Function(analysis.free_vars(y), y)
+        return y
+
+
+    @register_alter_op_layout("nn.dense", level=111)
+    def alter_dense(attrs, inputs, tinfos):
+        data, weight = inputs
+        new_attrs = dict(attrs)
+        new_attrs['kernel_layout'] = 'IO'
+        return relay.nn.dense(data, weight, **new_attrs)
+
+
+    def expected():
+        x = relay.var("x", shape=(16, 64))
+        weight = relay.var("weight", shape=(13, 64))
+        bias = relay.var("bias", shape=(13,))
+
+        weight = relay.layout_transform(weight, "OI", "IO")
+        y = relay.nn.dense(x, weight, units=13, kernel_layout="IO")
+        y = relay.nn.bias_add(y, bias, axis=1)
+        y = relay.Function(analysis.free_vars(y), y)
+        return y
+
+    a = before()
+    a = run_opt_pass(a, [transform.CanonicalizeOps(), transform.AlterOpLayout()])
+
+    b = expected()
+    b = run_opt_pass(b, [transform.CanonicalizeOps(), transform.InferType()])
+
+    assert(analysis.alpha_equal(a, b))
+
+
 if __name__ == "__main__":
     test_alter_op()
     test_alter_return_none()
@@ -590,3 +630,4 @@ if __name__ == "__main__":
     test_alter_layout_strided_slice()
     test_alter_layout_depthwise_conv2d()
     test_alter_layout_prelu()
+    test_alter_layout_dense()

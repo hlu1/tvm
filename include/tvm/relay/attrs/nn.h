@@ -354,6 +354,7 @@ struct AdaptivePool2DAttrs : public tvm::AttrsNode<AdaptivePool2DAttrs> {
 struct DenseAttrs : public tvm::AttrsNode<DenseAttrs> {
   IndexExpr units;
   DataType out_dtype;
+  std::string kernel_layout;
 
   TVM_DECLARE_ATTRS(DenseAttrs, "relay.attrs.DenseAttrs") {
     TVM_ATTR_FIELD(units)
@@ -363,6 +364,12 @@ struct DenseAttrs : public tvm::AttrsNode<DenseAttrs> {
     TVM_ATTR_FIELD(out_dtype)
         .set_default(NullValue<DataType>())
         .describe("Output data type, set to explicit type under mixed precision setting");
+
+    TVM_ATTR_FIELD(kernel_layout)
+        .set_default("OI")
+        .describe("Dimension ordering of weight. Can be 'OI', 'IO', or 'OI8O', etc."
+                    "'O' is the same as the hidden units of the dense transformation, "
+                    "and 'I' is the reduction axis");
   }
 };
 

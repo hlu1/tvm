@@ -111,9 +111,16 @@ bool DenseRel(const Array<Type>& types,
   const auto* data = types[0].as<TensorTypeNode>();
   const auto* weight = types[1].as<TensorTypeNode>();
   if (data == nullptr) return false;
+  static const Layout kOI("OI");
 
   const DenseAttrs* param = attrs.as<DenseAttrs>();
   CHECK(param != nullptr);
+  const Layout kernel_layout(param->kernel_layout);
+
+  const auto trans_kernel_layout = BijectiveLayoutNode::make(kernel_layout, kOI);
+  CHECK(trans_kernel_layout.defined())
+    << "Dense only supports kernel layouts that are convertible from OI."
+    << " But got " << kernel_layout;
 
   CHECK(static_cast<int>(data->shape.size()) != 0);
 
@@ -121,13 +128,15 @@ bool DenseRel(const Array<Type>& types,
   if (param->units.defined()) {
     Array<tvm::Expr> dshape = data->shape;
     // validate the weight shape is proper if defined
-    // Assign weight type
+    // assign weight type
     Array<IndexExpr> wshape({param->units, dshape[dshape.size() - 1]});
+    wshape = trans_kernel_layout.BackwardShape(wshape);
     reporter->Assign(types[1], TensorTypeNode::make(wshape, data->dtype));
     oshape.Set((oshape.size() - 1), param->units);
   } else {
+    // use weight to infer output shape
     if (weight == nullptr) return false;
-    Array<tvm::Expr> wshape = weight->shape;
+    auto wshape = trans_kernel_layout.ForwardShape(weight->shape);
     oshape.Set((oshape.size() - 1), wshape[0]);
   }
 
@@ -140,6 +149,14 @@ bool DenseRel(const Array<Type>& types,
   return true;
 }
 
+Array<Array<Layout>> DenseInferCorrectLayout(const Attrs& attrs,
+                                             const Array<Layout>& new_in_layouts,
+                                             const Array<Layout>& old_in_layouts,
+                                             const Array<Array<IndexExpr>>& old_in_shapes) {
+  const DenseAttrs* params = attrs.as<DenseAttrs>();
+  CHECK(params != nullptr);
+  return Array<Array<Layout>>{{"NC", params->kernel_layout}, {"NC"}};
+}
 
 // Positional relay function to create dense operator used by frontend FFI.
 Expr MakeDense(Expr data,
@@ -149,6 +166,7 @@ Expr MakeDense(Expr data,
   auto attrs = make_node<DenseAttrs>();
   attrs->units = units;
   attrs->out_dtype = out_dtype;
+  attrs->kernel_layout = "OI";
   static const Op& op = Op::Get("nn.dense");
   return CallNode::make(op, {data, weight}, Attrs(attrs), {});
 }
@@ -171,6 +189,7 @@ RELAY_REGISTER_OP("nn.dense")
 .add_argument("data", "nD Tensor", "Input data.")
 .add_argument("weight", "2D Tensor", "Weight matrix.")
 .set_support_level(1)
+.set_attr<FInferCorrectLayout>("FInferCorrectLayout", DenseInferCorrectLayout)
 .add_type_rel("Dense", DenseRel);
 
 // relay.leaky_relu

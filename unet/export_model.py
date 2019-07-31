@@ -1,9 +1,11 @@
 from __future__ import absolute_import, division, print_function, unicode_literals
 
 import logging
+import os
 import shutil
 import tempfile
 
+import build_module
 import click
 import nnvm
 import tvm
@@ -12,126 +14,158 @@ from caffe2.proto import caffe2_pb2, metanet_pb2
 from nnvm.frontend import from_caffe2
 from tvm import autotvm
 
-import build_module
 
+class C2Exporter(object):
+    def __init__(
+        self,
+        init_net,
+        pred_net,
+        input_sizes,
+        output,
+        autotvm_log,
+        opt_level=3,
+        device="local",
+        arch=None,
+    ):
+        # read input model
+        self.init_net_path = init_net
+        self.pred_net_path = pred_net
+        self.is_meta_netdef = False
+        try:
+            with open(init_net, "rb") as f:
+                self.init_net = metanet_pb2.MetaNetDef()
+                self.init_net.ParseFromString(f.read())
+            with open(pred_net, "rb") as f:
+                self.pred_net = metanet_pb2.MetaNetDef()
+                self.pred_net.ParseFromString(f.read())
+                print(self.pred_net)
+            self.is_meta_netdef = True
+        except Exception as e:
+            logging.exception(e)
+            logging.info(
+                "Failed to read inputs as MetaNetDefs, read inputs as NetDefs instead"
+            )
+            with open(init_net, "rb") as f:
+                self.init_net = caffe2_pb2.NetDef()
+                self.init_net.ParseFromString(f.read())
+            with open(pred_net, "rb") as f:
+                self.pred_net = caffe2_pb2.NetDef()
+                self.pred_net.ParseFromString(f.read())
+        self.input_sizes = input_sizes if input_sizes else []
+        self.output = output
+        self.autotvm_log = autotvm_log
+        self.opt_level = opt_level
+        self.device = device
+        self.arch = arch
 
-skl_target = tvm.target.create("llvm -mcpu=skylake-avx512 -target=x86_64-linux-gnu")
-local_target = tvm.target.create("llvm -mcpu=core-avx2")
-rpi_target = tvm.target.arm_cpu("rasp3b")
-android_target = tvm.target.create(
-    "llvm -device=arm_cpu -target=armv7-none-linux-androideabi -mfloat-abi=soft"
-)
+        skl_target = tvm.target.create(
+            "llvm -mcpu=skylake-avx512 -target=x86_64-linux-gnu"
+        )
+        local_target = tvm.target.create("llvm -mcpu=core-avx2")
+        rpi_target = tvm.target.arm_cpu("rasp3b")
+        android_armv7_target = tvm.target.create(
+            "llvm -device=arm_cpu -target=armv7-none-linux-androideabi -mattr=+neon -mfloat-abi=soft"
+        )
+        android_arm64_target = tvm.target.create(
+            "llvm -device=arm_cpu -target=arm64-none-linux-android -mattr=+neon -mfloat-abi=soft"
+        )
+        self.targets = {
+            "skl": skl_target,
+            "local": local_target,
+            "rpi": rpi_target,
+            "android_armv7": android_armv7_target,
+            "android_arm64": android_arm64_target,
+        }
 
+    def _save_graph(self, graph, fname):
+        g = graph.json()
+        with open(fname, "w") as f:
+            f.write(g)
 
-def _save_graph(graph, fname):
-    g = graph.json()
-    with open(fname, "w") as f:
-        f.write(g)
+    def _dump_params(self, params):
+        for k, v in params.items():
+            logging.info(k, v.dtype, v.shape)
 
+    def _add_arg(self, net, name, s):
+        arg = net.arg.add()
+        arg.name = name
+        arg.s = s
 
-def _dump_params(params):
-    for k, v in params.items():
-        logging.info(k, v.dtype, v.shape)
+    def save_model(self, output, net):
+        if not output.endswith(".pb"):
+            output = output + "/tvm.pb"
+        with open(output, "wb") as f:
+            f.write(net.SerializeToString())
+            logging.info("Exported model saved at: %s" % output)
 
+    def set_version(self, version):
+        if self.is_meta_netdef:
+            self.init_net.modelInfo.version = str(version)
+            self.pred_net.modelInfo.version = str(version)
 
-def _save_lib(lib, fname, target, device):
-    assert lib
-    tmp = tvm.contrib.util.tempdir()
-    lib_fname = tmp.relpath(fname)
-    fcompile = None
-    if device == "android":
-        from tvm.contrib import ndk
+    def _save_lib(self, lib, fname, target, arch):
+        tmp = tvm.contrib.util.tempdir()
+        lib_fname = tmp.relpath(fname)
+        fcompile = None
+        if self.device == "android":
+            if arch == "armv7":
+                os.environ[
+                    "TVM_NDK_CC"
+                ] = "/opt/android-toolchain-arm/bin/arm-linux-androideabi-clang++"
+            elif arch == "arm64":
+                os.environ[
+                    "TVM_NDK_CC"
+                ] = "/opt/android-toolchain-arm64/bin/aarch64-linux-android-clang++"
+            else:
+                raise Exception("unsupported arch: %s" % arch)
+            from tvm.contrib import ndk
 
-        fcompile = ndk.create_shared
-    with tvm.target.create(target):
-        lib.export_library(lib_fname, fcompile)
-    with tempfile.NamedTemporaryFile(delete=False) as f:
-        shutil.copyfile(lib_fname, f.name)
-    return f.name
+            fcompile = ndk.create_shared
 
+        with tvm.target.create(target):
+            lib.export_library(lib_fname, fcompile)
+        with tempfile.NamedTemporaryFile(delete=False) as f:
+            shutil.copyfile(lib_fname, f.name)
+        return f.name
 
-def _add_arg(net, name, s):
-    arg = net.arg.add()
-    arg.name = name
-    arg.s = s
+    def _convert_args(self, pre_graph, lib_pregraph, graph, lib, target, arch=None):
+        suffix = "_" + arch if arch else ""
+        args = {}
+        fmt = ".so" if self.device == "android" else ".tar"
+        if pre_graph:
+            assert isinstance(pre_graph, nnvm.graph.Graph)
+            args["tvm_pregraph" + suffix] = str.encode(pre_graph.json())
 
+        if lib_pregraph:
+            f_name = self._save_lib(lib_pregraph, "pre_graph" + fmt, target, arch)
+            with open(f_name, "rb") as f:
+                args["tvm_lib_pregraph" + suffix] = f.read()
 
-def _pack_model(
-    predict,
-    graph,
-    lib,
-    pre_graph=None,
-    lib_pregraph=None,
-    device="llvm",
-    arm_arch="armv7",
-):
-    suffix = "_" + arm_arch if device == "android" else ""
-    if pre_graph is not None:
-        assert isinstance(pre_graph, str)
-        _add_arg(predict, "tvm_pregraph" + suffix, str.encode(pre_graph))
+        assert isinstance(graph, nnvm.graph.Graph)
+        args["tvm_graph" + suffix] = str.encode(graph.json())
 
-    if lib_pregraph is not None:
-        with open(lib_pregraph, "rb") as f:
-            _add_arg(predict, "tvm_lib_pregraph" + suffix, f.read())
+        assert lib
+        f_name = self._save_lib(lib, "graph" + fmt, target, arch)
+        with open(f_name, "rb") as f:
+            args["tvm_lib" + suffix] = f.read()
 
-    assert isinstance(graph, str)
-    _add_arg(predict, "tvm_graph" + suffix, str.encode(graph))
+        return args
 
-    with open(lib, "rb") as f:
-        _add_arg(predict, "tvm_lib" + suffix, f.read())
-    return predict
+    def _pack_model(self, net, args):
+        for k, v in args.items():
+            self._add_arg(net, k, v)
+        return net
 
-
-def _save_model(output_file, net):
-    with open(output_file, "wb") as f:
-        f.write(net.SerializeToString())
-        print("Exported model saved at:", output_file)
-
-
-@click.command()
-@click.option("--init_net", type=click.Path())
-@click.option("--pred_net", type=click.Path())
-@click.option("--input_size1", type=(int, int, int, int), default=(1, 3, 192, 192))
-@click.option("--input_size2", type=(int, int, int, int), default=(1, 4, 192, 192))
-@click.option("--output", type=click.Path())
-@click.option("--autotvm_log", type=click.Path())
-@click.option("--opt_level", default=3)
-@click.option(
-    "--device", type=click.Choice(["skl", "rpi", "local", "android"]), required=True
-)
-# Todo: add arm64 support
-@click.option("--arm_arch", type=click.Choice(["armv7", "arm64"]), default="armv7")
-@click.option("--verbose", is_flag=True, default=False)
-def main(
-    init_net,
-    pred_net,
-    input_size1,
-    input_size2,
-    output,
-    autotvm_log,
-    opt_level,
-    device,
-    arm_arch,
-    verbose,
-):
-    logging.basicConfig(level=logging.INFO if not verbose else logging.DEBUG)
-
-    target = dict(
-        skl=skl_target, rpi=rpi_target, local=local_target, android=android_target
-    )[device]
-
-    def compile(net, sym, params, input_name, data_shape):
-        with autotvm.apply_history_best(str(autotvm_log)):
-            with nnvm.compiler.build_config(opt_level=opt_level):
+    def build(self, sym, params, target, input_name, data_shape):
+        """
+        Given a c2 model, convert into nnvm graph, run tvm build_module.build, and return
+        the generated pre_graph, lib_pregraph.so, graph, lib_graph.so
+        """
+        with autotvm.apply_history_best(str(self.autotvm_log)):
+            with nnvm.compiler.build_config(opt_level=self.opt_level):
                 with tvm.build_config(partition_const_loop=True):
                     pre_graph, graph, lib, _ = build_module.build(
                         sym, target, shape={input_name: data_shape}, params=params
-                    )
-                    lib_f = _save_lib(
-                        lib,
-                        "net.so" if device == "android" else "net.tar",
-                        target,
-                        device,
                     )
                     logging.debug(graph.symbol().debug_str())
 
@@ -142,55 +176,135 @@ def main(
                     _, pre_graph, lib_pregraph, _ = build_module.build(
                         pre_graph, target, shape, dtype
                     )
-                    lib_pregraph_f = _save_lib(
-                        lib_pregraph,
-                        "pre_graph.so" if device == "android" else "pre_graph.tar",
-                        target,
-                        device,
-                    )
                     logging.debug(pre_graph.symbol().debug_str())
+            else:
+                pre_graph, lib_pregraph = None, None
+        return (pre_graph, lib_pregraph, graph, lib)
 
-        return _pack_model(
-            net, graph.json(), lib_f, pre_graph.json(), lib_pregraph_f, device, arm_arch
-        )
-
-    try:
-        with open(init_net, "rb") as f:
-            init_meta_net = metanet_pb2.MetaNetDef()
-            init_meta_net.ParseFromString(f.read())
-        with open(pred_net, "rb") as f:
-            pred_meta_net = metanet_pb2.MetaNetDef()
-            pred_meta_net.ParseFromString(f.read())
-
-        num_models = len(pred_meta_net.nets)
-        num_models = len(pred_meta_net.nets)
-        assert num_models <= 2
-        if num_models == 2:
-            input_shapes = [input_size1, input_size2]
+    def export(self, version=None):
+        """
+        for every sub model in the model (when model is meta_netdef):
+            for every arm arch (when is android):
+                pre_graph, lib_pregraph.so, graph, lib_graph.so = build(model)
+                save all .so onto disk
+                add all four objects to init_net
+        save init_net
+        """
+        if self.is_meta_netdef:
+            self.export_meta_netdef(version)
         else:
-            input_shapes = [input_size1]
-        for index in range(num_models):
-            init = init_meta_net.nets[index].value
-            pred = pred_meta_net.nets[index].value
-            input_name = pred.external_input[0]
-            sym, params = from_caffe2(init, pred)
-            init = compile(init, sym, params, input_name, input_shapes[index])
-        _save_model(output, init_meta_net)
-    except Exception as e:
-        logging.exception(e)
-        logging.info(
-            "Failed to read inputs as MetaNetDefs, read inputs as NetDefs instead"
-        )
-        with open(init_net, "rb") as f:
-            init_net = caffe2_pb2.NetDef()
-            init_net.ParseFromString(f.read())
-        with open(pred_net, "rb") as f:
-            pred_net = caffe2_pb2.NetDef()
-            pred_net.ParseFromString(f.read())
-        input_name = pred_net.external_input[0]
+            self.export_netdef()
+
+    def process_net(self, init_net, pred_net, input_name, input_size):
         sym, params = from_caffe2(init_net, pred_net)
-        init_net = compile(init_net, sym, params, input_name, input_size1)
-        _save_model(output, init_net)
+        if self.device == "android":
+            if self.arch == "all":
+                for arch in ["armv7", "arm64"]:
+                    device = self.device + "_" + arch
+                    target = self.targets[device]
+                    pre_graph, lib_pregraph, graph, lib = self.build(
+                        sym, params, target, input_name, input_size
+                    )
+                    args = self._convert_args(
+                        pre_graph, lib_pregraph, graph, lib, target, arch
+                    )
+                    self._pack_model(init_net, args)
+            else:
+                assert self.arch in ["armv7", "arm64"]
+                device = self.device + "_" + self.arch
+                target = self.targets[device]
+                pre_graph, lib_pregraph, graph, lib = self.build(
+                    sym, params, target, input_name, input_size
+                )
+                args = self._convert_args(
+                    pre_graph, lib_pregraph, graph, lib, target, self.arch
+                )
+                self._pack_model(init_net, args)
+        else:
+            target = self.targets[self.device]
+            pre_graph, lib_pregraph, graph, lib = self.build(
+                sym, params, target, input_name, input_size
+            )
+            args = self._convert_args(pre_graph, lib_pregraph, graph, lib, target)
+            self._pack_model(init_net, args)
+        return init_net, pred_net
+
+    def export_netdef(self):
+        assert not self.is_meta_netdef
+        input_name = self.pred_net.external_input[0]
+        assert len(self.input_sizes) == 1
+        self.process_net(
+            self.init_net, self.pred_net, input_name, self.input_sizes[0]
+        )
+        # save init_net to output
+        self.save_model(self.output, self.init_net)
+
+    def export_meta_netdef(self, version=None):
+        assert self.is_meta_netdef
+        num_models = len(self.pred_net.nets)
+        assert len(self.input_sizes) == num_models
+        for index in range(num_models):
+            init_net = self.init_net.nets[index].value
+            pred_net = self.pred_net.nets[index].value
+            input_name = pred_net.external_input[0]
+            self.process_net(init_net, pred_net, input_name, self.input_sizes[index])
+        # save models
+        if version:
+            self.set_version(version)
+            if self.output.endswith(".pb"):
+                is_root_dir = self.output.startswith("/")
+                tokens = self.output.split("/")
+                self.output = (
+                    ("/" + "/".join(tokens[:-1]))
+                    if is_root_dir
+                    else "/".join(tokens[:-1])
+                )
+                # handle empty case
+                if not self.output:
+                    self.output = "."
+            self.save_model(
+                self.output + "/" + self.init_net_path.split("/")[-1], self.init_net
+            )
+            self.save_model(
+                self.output + "/" + self.pred_net_path.split("/")[-1], self.pred_net
+            )
+        else:
+            self.save_model(self.output, self.init_net)
+
+
+@click.command()
+@click.option("--init_net", type=click.Path())
+@click.option("--pred_net", type=click.Path())
+@click.option("--input_size1", nargs=4, type=int, default=(1, 3, 192, 192))
+@click.option("--input_size2", nargs=4, type=int)
+@click.option("--output", type=click.Path())
+@click.option("--version", type=str, default=None)
+@click.option("--autotvm_log", type=click.Path())
+@click.option("--opt_level", default=3)
+@click.option(
+    "--device", type=click.Choice(["skl", "rpi", "local", "android"]), required=True
+)
+@click.option("--arch", type=click.Choice(["armv7", "arm64", "all"]), default=None)
+@click.option("--verbose", is_flag=True, default=False)
+def main(
+    init_net,
+    pred_net,
+    input_size1,
+    input_size2,
+    output,
+    version,
+    autotvm_log,
+    opt_level,
+    device,
+    arch,
+    verbose,
+):
+    logging.basicConfig(level=logging.INFO if not verbose else logging.DEBUG)
+    input_sizes = [input_size1, input_size2] if input_size2 else [input_size1]
+    exporter = C2Exporter(
+        init_net, pred_net, input_sizes, output, autotvm_log, opt_level, device, arch
+    )
+    exporter.export(version)
 
 
 if __name__ == "__main__":

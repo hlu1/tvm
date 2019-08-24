@@ -79,31 +79,34 @@ def get_caffe2_output(model, x, dtype='float32'):
     return c2_output
 
 
-def verify_caffe2_forward_impl(model, data_shape, out_shape):
+def verify_caffe2_forward_impl(model, data_shape):
     dtype = 'float32'
     data = np.random.uniform(size=data_shape).astype(dtype)
     c2_out = get_caffe2_output(model, data, dtype)
+    out_shape = c2_out.shape
+    print(out_shape)
     for target, ctx in ctx_list():
         tvm_out = get_tvm_output(model, data, target, ctx, out_shape, dtype)
         tvm.testing.assert_allclose(c2_out, tvm_out, rtol=1e-5, atol=1e-5)
 
 
 def test_forward_squeezenet1_1():
-    verify_caffe2_forward_impl(c2_squeezenet, (1, 3, 224, 224), (1, 1000, 1, 1))
+    verify_caffe2_forward_impl(c2_squeezenet, (1, 3, 224, 224))
 
 
 def test_forward_resnet50():
-    verify_caffe2_forward_impl(c2_resnet50, (1, 3, 224, 224), (1, 1000))
+    verify_caffe2_forward_impl(c2_resnet50, (1, 3, 224, 224))
 
 
 def test_forward_vgg19():
-    verify_caffe2_forward_impl(c2_vgg19, (1, 3, 224, 224), (1, 1000))
+    verify_caffe2_forward_impl(c2_vgg19, (1, 3, 224, 224))
 
 
 Model = namedtuple('Model', ['init_net', 'predict_net'])
 
 
-def test_elementwise_add():
+def test_elementwise_op(op):
+    assert isinstance(op, str)
     data_shape = (1, 16, 9, 9)
     init_net = caffe2_pb2.NetDef()
     init_net.name = 'test_init_net'
@@ -131,14 +134,14 @@ def test_elementwise_add():
     predict_net.external_output[:] = ['C']
     predict_net.op.extend([
         core.CreateOperator(
-            'Add',
+            op,
             ['A', 'B'],
             ['C'],
         )
     ])
 
     model = Model(init_net, predict_net)
-    verify_caffe2_forward_impl(model, data_shape, data_shape)
+    verify_caffe2_forward_impl(model, data_shape)
 
 
 def test_elementwise_add_with_broadcast():
@@ -177,7 +180,7 @@ def test_elementwise_add_with_broadcast():
     ])
 
     model = Model(init_net, predict_net)
-    verify_caffe2_forward_impl(model, data_shape, data_shape)
+    verify_caffe2_forward_impl(model, data_shape)
 
 
 def test_normalize_yuv():
@@ -222,13 +225,183 @@ def test_normalize_yuv():
     ])
 
     model = Model(init_net, predict_net)
-    verify_caffe2_forward_impl(model, data_shape, data_shape)
+    verify_caffe2_forward_impl(model, data_shape)
+
+
+def test_dense(pretransposed=False):
+    M, N, K = 13, 7, 16
+    for data_shape in ((M, K), (M, K, 1, 1)):
+        weight_shape = (K, N) if pretransposed else (N, K)
+        bias_shape = (N,)
+        init_net = caffe2_pb2.NetDef()
+        init_net.name = 'test_init_net'
+        init_net.external_output[:] = ['I', 'W', 'B']
+        init_net.op.extend([
+            core.CreateOperator(
+                'GivenTensorFill',
+                [],
+                ['I'],
+                shape=data_shape,
+                values=np.random.uniform(size=data_shape).flatten().tolist(),
+            ),
+            core.CreateOperator(
+                'GivenTensorFill',
+                [],
+                ['W'],
+                shape=weight_shape,
+                values=np.random.uniform(size=weight_shape).flatten().tolist(),
+            ),
+            core.CreateOperator(
+                'GivenTensorFill',
+                [],
+                ['B'],
+                shape=bias_shape,
+                values=np.random.uniform(size=bias_shape).flatten().tolist(),
+            ),
+        ])
+
+        predict_net = caffe2_pb2.NetDef()
+        predict_net.name = 'test_predict_net'
+        predict_net.external_input[:] = ['I', 'W', 'B']
+        predict_net.external_output[:] = ['Y']
+        predict_net.op.extend([
+            core.CreateOperator(
+                'FCTransposed' if pretransposed else 'FC',
+                ['I', 'W', 'B'],
+                ['Y'],
+            )
+        ])
+
+        model = Model(init_net, predict_net)
+        verify_caffe2_forward_impl(model, data_shape)
+
+
+def test_batch_matmul(trans_a=0, trans_b=1):
+    B, M, N, K = 4, 13, 7, 16
+    data_shape = (B, M, K) if not trans_a else (B, K, M)
+    weight_shape = (B, N, K) if trans_b else (B, K, N)
+    init_net = caffe2_pb2.NetDef()
+    init_net.name = 'test_init_net'
+    init_net.external_output[:] = ['I', 'W']
+    init_net.op.extend([
+        core.CreateOperator(
+            'GivenTensorFill',
+            [],
+            ['I'],
+            shape=data_shape,
+            values=np.random.uniform(size=data_shape).flatten().tolist(),
+        ),
+        core.CreateOperator(
+            'GivenTensorFill',
+            [],
+            ['W'],
+            shape=weight_shape,
+            values=np.random.uniform(size=weight_shape).flatten().tolist(),
+        ),
+    ])
+
+    predict_net = caffe2_pb2.NetDef()
+    predict_net.name = 'test_predict_net'
+    predict_net.external_input[:] = ['I', 'W']
+    predict_net.external_output[:] = ['Y']
+    predict_net.op.extend([
+        core.CreateOperator(
+            'BatchMatMul',
+            ['I', 'W'],
+            ['Y'],
+            trans_a=trans_a,
+            trans_b=trans_b,
+        )
+    ])
+
+    model = Model(init_net, predict_net)
+    verify_caffe2_forward_impl(model, data_shape)
+
+
+def test_reshape(m, n, shape):
+    data_shape = (m, n)
+    init_net = caffe2_pb2.NetDef()
+    init_net.name = 'test_init_net'
+    init_net.external_output[:] = ['X']
+    init_net.op.extend([
+        core.CreateOperator(
+            'GivenTensorFill',
+            [],
+            ['X'],
+            shape=data_shape,
+            values=np.random.uniform(size=data_shape).flatten().tolist(),
+        ),
+    ])
+
+    predict_net = caffe2_pb2.NetDef()
+    predict_net.name = 'test_predict_net'
+    predict_net.external_input[:] = ["X"]
+    predict_net.external_output[:] = ["Y"]
+    predict_net.op.add().CopyFrom(
+        core.CreateOperator(
+            "Reshape",
+            ["X"],
+            ["Y", "old_shape"],
+            shape=shape,
+        )
+    )
+
+    model = Model(init_net, predict_net)
+    verify_caffe2_forward_impl(model, data_shape)
+
+
+def test_flatten(data_shape, axis=1):
+    init_net = caffe2_pb2.NetDef()
+    init_net.name = 'test_init_net'
+    init_net.external_output[:] = ['X']
+    init_net.op.extend([
+        core.CreateOperator(
+            'GivenTensorFill',
+            [],
+            ['X'],
+            shape=data_shape,
+            values=np.random.uniform(size=data_shape).flatten().tolist(),
+        ),
+    ])
+
+    predict_net = caffe2_pb2.NetDef()
+    predict_net.name = 'test_predict_net'
+    predict_net.external_input[:] = ["X"]
+    predict_net.external_output[:] = ["Y"]
+    predict_net.op.add().CopyFrom(
+        core.CreateOperator(
+            "Flatten",
+            ["X"],
+            ["Y"],
+            axis=axis,
+        )
+    )
+
+    model = Model(init_net, predict_net)
+    verify_caffe2_forward_impl(model, data_shape)
+
 
 
 if __name__ == '__main__':
     test_forward_squeezenet1_1()
     test_forward_resnet50()
     test_forward_vgg19()
-    test_elementwise_add()
+
+    test_elementwise_op('Add')
+    test_elementwise_op('Mul')
     test_elementwise_add_with_broadcast()
     test_normalize_yuv()
+    test_dense()
+    test_dense(pretransposed=True)
+    test_batch_matmul(0, 0)
+    test_batch_matmul(0, 1)
+    test_batch_matmul(1, 0)
+    test_batch_matmul(1, 1)
+    test_reshape(7, 16, [7, -1, 1])
+    test_reshape(7, 16, [7, -1, 4, 1])
+    test_flatten([4, 5])
+    test_flatten([4, 5], 0)
+    test_flatten([4, 5, 6, 8], 0)
+    test_flatten([4, 5, 6, 8], 1)
+    test_flatten([4, 5, 6, 8], 2)
+    test_flatten([4, 5, 6, 8], 3)

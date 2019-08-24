@@ -24,7 +24,7 @@ from .. import module as _module
 from .. import op as _op
 from ... import nd as _nd
 from .common import AttrCvt, Renamer
-from .common import get_relay_op, new_var, infer_channels
+from .common import get_relay_op, new_var, infer_channels, infer_shape
 
 __all__ = ['from_caffe2']
 
@@ -171,6 +171,12 @@ class Add(Elemwise):
     name = 'add'
 
 
+class Mul(Elemwise):
+    """ Operator converter for Mul.
+    """
+    name = 'multiply'
+
+
 class Pool(Caffe2OpConverter):
     """ A helper class for pool op converters.
     """
@@ -247,12 +253,60 @@ class Concat(Caffe2OpConverter):
             raise tvm.error.OpAttributeUnImplemented(
                 'Order {} is not supported in operator Concat.'.format(order))
 
-        return AttrCvt(
-            op_name='concatenate',
-            transforms={
-                'order': ('axis', (1), _get_axis_from_order_str),
-            },
-            excludes=['add_axis'])((inputs,), args, params)
+        if 'axis' in args:
+            axis = args['axis']
+            add_axis = args.get('add_axis', 0)
+        else:
+            axis = _get_axis_from_order_str(args.get('order', 'NCHW'))
+            add_axis = 0
+
+        out = _op.concatenate(inputs, axis)
+        if add_axis:
+            newshape = [0] * add_axis
+            newshape.extend([-4, len(inputs), -1, -2])
+            out = _op.reshape(out, newshape=newshape)
+        return out
+
+
+class Reshape(Caffe2OpConverter):
+    """ Operator converter for Reshape.
+    """
+
+    @classmethod
+    def _impl(cls, inputs, args, params):
+        assert len(inputs) == 1 and 'shape' in args
+        out = _op.reshape(inputs[0], args['shape'])
+        return out
+
+
+class Transpose(Caffe2OpConverter):
+    """ Operator converter for Transpose.
+    """
+
+    @classmethod
+    def _impl(cls, inputs, args, params):
+        return _op.transpose(inputs[0], args.get('axes', None))
+
+
+class Flatten(Caffe2OpConverter):
+    """ Operator converter for Flatten.
+    """
+
+    @classmethod
+    def _impl(cls, inputs, args, params):
+        axis = args.get('axis', 1)
+        if axis == 1:
+            return _op.nn.batch_flatten(inputs[0])
+        # When axis > 1, flatten will result in a 2D tensor
+        # (d_0 X d_1 ... d_(axis-1), d_axis X d_(axis+1) ... X dn).
+        shapes = infer_shape(inputs[0])
+        before = 1
+        for i, shape in enumerate(shapes):
+            if i < axis:
+                before *= shape
+            else:
+                break
+        return _op.reshape(inputs[0], newshape=[before, -1])
 
 
 class NormalizePlanarYUV(Caffe2OpConverter):
@@ -314,13 +368,54 @@ class FC(Caffe2OpConverter):
 
     @classmethod
     def _impl(cls, inputs, args, params):
-        inputs[0] = _op.nn.batch_flatten(inputs[0])
+        if len(infer_shape(inputs[0])) > 2:
+            inputs[0] = _op.nn.batch_flatten(inputs[0])
         units = infer_channels(inputs[1])
-        res = _op.nn.dense(inputs[0], inputs[1], units=units)
+        out = _op.nn.dense(inputs[0], inputs[1], units=units)
         use_bias = len(inputs) == 3
         if use_bias:
-            res = _op.nn.bias_add(res, inputs[2])
-        return res
+            out = _op.nn.bias_add(out, inputs[2])
+        return out
+
+
+class FCTransposed(Caffe2OpConverter):
+    """ Operator converter for FCTransposed.
+    """
+
+    @classmethod
+    def _impl(cls, inputs, args, params):
+        if len(infer_shape(inputs[0])) > 2:
+            inputs[0] = _op.nn.batch_flatten(inputs[0])
+        inputs[1] = _op.transpose(inputs[1])
+        units = infer_channels(inputs[1])
+        out = _op.nn.dense(inputs[0], inputs[1], units=units)
+        use_bias = len(inputs) == 3
+        if use_bias:
+            out = _op.nn.bias_add(out, inputs[2])
+        return out
+
+
+class BatchMatMul(Caffe2OpConverter):
+    """ Operator converter for BatchMatMul.
+    """
+
+    @classmethod
+    def _impl(cls, inputs, args, params):
+        assert len(inputs) == 2
+        broadcast = args.get('broadcast', 0)
+        assert broadcast == 0
+        for i in inputs:
+            assert len(infer_shape(i)) == 3
+
+        trans_a = args.get('trans_a', 0)
+        if trans_a:
+            inputs[0] = _op.transpose(inputs[0], [0, 2, 1])
+        trans_b = args.get('trans_b', 0)
+        if not trans_b:
+            inputs[1] = _op.transpose(inputs[1], [0, 2, 1])
+
+        out = _op.nn.batch_matmul(inputs[0], inputs[1])
+        return out
 
 
 class SpatialBN(Caffe2OpConverter):
@@ -352,6 +447,7 @@ def _get_convert_map():
         # caffe2 common operators
         'Add': Add.get_converter(),
         'Sum': Sum.get_converter(),
+        'Mul': Mul.get_converter(),
         'Softmax': Softmax.get_converter(),
 
         # nn
@@ -360,11 +456,19 @@ def _get_convert_map():
         'Conv': Conv.get_converter(),
         'Concat': Concat.get_converter(),
         'FC': FC.get_converter(),
+        'FCTransposed': FCTransposed.get_converter(),
+        'BatchMatMul': BatchMatMul.get_converter(),
+        'Transpose': Transpose.get_converter(),
+        'Reshape': Reshape.get_converter(),
+        'Flatten': Flatten.get_converter(),
+
         'SpatialBN': SpatialBN.get_converter(),
         'ResizeNearest': ResizeNearest.get_converter(),
-        'Relu': AttrCvt('relu', {}, ignores=['order']),
-        'Sigmoid': Renamer('sigmoid'),
-        'Dropout': AttrCvt('dropout', {'ratio': 'rate'}, ignores=['is_test']),
+        'Relu': AttrCvt('relu', {}, ignores=['order', 'net_pos']),
+        'Sigmoid': AttrCvt('sigmoid', {}, ignores=['net_pos']),
+        'Tanh': AttrCvt('tanh', {}, ignores=['net_pos']),
+        'Dropout': AttrCvt('dropout', {'ratio': 'rate'}, ignores=['is_test', 'net_pos']),
+        "EnsureCPUOutput": AttrCvt('copy', {}, ignores=['net_pos']),
 
         # c2 image preprocessing ops
         'NormalizePlanarYUV': NormalizePlanarYUV.get_converter(),
@@ -443,7 +547,8 @@ class Caffe2NetDef(object):
         # Outputs
         out = []
         for blob in predict_net.external_output:
-            out.append(self._nodes[blob])
+            if blob in self._nodes:  # filter out outputs dropped during the conversion
+                out.append(self._nodes[blob])
 
         if len(out) > 1:
             outputs = _expr.Tuple(out)

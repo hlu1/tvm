@@ -4,6 +4,7 @@ import click
 import numpy as np
 import topi
 import tvm
+from tvm import te
 
 
 TARGETS = dict(
@@ -14,23 +15,23 @@ TARGETS = dict(
 
 
 def deep_wide(target, batch_size=128, split_concat=True, num_features=50, emb_size=32):
-    ad_emb = tvm.placeholder((batch_size, emb_size), name="ad_emb")
-    usr_emb = tvm.placeholder((1, emb_size), name="usr_emb")
-    wide = tvm.placeholder((batch_size, num_features), name="wide")
+    ad_emb = te.placeholder((batch_size, emb_size), name="ad_emb")
+    usr_emb = te.placeholder((1, emb_size), name="usr_emb")
+    wide = te.placeholder((batch_size, num_features), name="wide")
 
-    fc_w = tvm.placeholder((1, num_features + 1), name="fc_w")
-    fc_w_dp = tvm.placeholder((1, 1), name="fc_w_dp")
-    fc_w_wide = tvm.placeholder((1, num_features), name="fc_w_wide")
-    fc_b = tvm.placeholder((1,), name="fc_b")
+    fc_w = te.placeholder((1, num_features + 1), name="fc_w")
+    fc_w_dp = te.placeholder((1, 1), name="fc_w_dp")
+    fc_w_wide = te.placeholder((1, num_features), name="fc_w_wide")
+    fc_b = te.placeholder((1,), name="fc_b")
 
     # Add + Mul, ReplaceNaN, Clip
-    mu = tvm.placeholder((1, num_features), name="mu")
-    sigma = tvm.placeholder((1, num_features), name="sigma")
+    mu = te.placeholder((1, num_features), name="mu")
+    sigma = te.placeholder((1, num_features), name="sigma")
 
     wide_normalized = topi.multiply(topi.add(wide, mu), sigma)
-    wide_noNaN = tvm.compute(
+    wide_noNaN = te.compute(
         (batch_size, num_features),
-        lambda i, j: tvm.if_then_else(
+        lambda i, j: tvm.tir.if_then_else(
             topi.isnan(wide_normalized)[i, j], 0, wide_normalized[i, j]
         ),
         name="wide_noNaN",
@@ -40,10 +41,10 @@ def deep_wide(target, batch_size=128, split_concat=True, num_features=50, emb_si
     wide_preproc = topi.clip(wide_noNaN, -10.0, 10.0)
 
     # batch_matmul + flatten => matmul
-    k1 = tvm.reduce_axis((0, emb_size), "k1")
-    dp = tvm.compute(
+    k1 = te.reduce_axis((0, emb_size), "k1")
+    dp = te.compute(
         (batch_size, 1),
-        lambda i, j: tvm.sum(ad_emb[i, k1] * usr_emb[j, k1], axis=k1),
+        lambda i, j: te.sum(ad_emb[i, k1] * usr_emb[j, k1], axis=k1),
         name="dp",
     )
 
@@ -51,14 +52,14 @@ def deep_wide(target, batch_size=128, split_concat=True, num_features=50, emb_si
 
     if split_concat:
         # fc_dp
-        fc_dp = tvm.compute(
+        fc_dp = te.compute(
             (batch_size, 1), lambda i, j: dp[i, j] * fc_w_dp[0, 0], name="fc_dp"
         )
         # fc_wide
-        k2 = tvm.reduce_axis((0, num_features), "k2")
-        fc = tvm.compute(
+        k2 = te.reduce_axis((0, num_features), "k2")
+        fc = te.compute(
             (batch_size, 1),
-            lambda i, j: tvm.sum(wide_preproc[i, k2] * fc_w_wide[j, k2], axis=k2),
+            lambda i, j: te.sum(wide_preproc[i, k2] * fc_w_wide[j, k2], axis=k2),
             name="fc_wide",
         )
         # add
@@ -66,9 +67,9 @@ def deep_wide(target, batch_size=128, split_concat=True, num_features=50, emb_si
     else:
         # concat, fc
         concat = topi.concatenate((dp, wide_preproc), axis=1)
-        k2 = tvm.reduce_axis((0, num_features + 1), "k2")
-        fc = tvm.compute(
-            (batch_size, 1), lambda i, j: tvm.sum(concat[i, k2] * fc_w[j, k2], axis=k2)
+        k2 = te.reduce_axis((0, num_features + 1), "k2")
+        fc = te.compute(
+            (batch_size, 1), lambda i, j: te.sum(concat[i, k2] * fc_w[j, k2], axis=k2)
         )
         fc_out = topi.add(fc, fc_b)
 
@@ -76,8 +77,8 @@ def deep_wide(target, batch_size=128, split_concat=True, num_features=50, emb_si
     out = topi.sigmoid(fc_out)
     # out = topi.nn.relu(fc_out)
 
-    s = tvm.create_schedule(out.op)
-    tvm.schedule.AutoInlineInjective(s)
+    s = te.create_schedule(out.op)
+    te.schedule.AutoInlineInjective(s)
     x, y = s[out].op.axis
     fused = s[out].fuse(x, y)
 
@@ -100,7 +101,7 @@ def deep_wide(target, batch_size=128, split_concat=True, num_features=50, emb_si
         args_tvm = [ad_emb, usr_emb, wide, mu, sigma, fc_w, fc_b, out]
 
     func = tvm.build(s, args_tvm, target=target, name="fused_op")
-    # print(tvm.lower(s, args_tvm, simple_mode=True))
+    print(tvm.lower(s, args_tvm, simple_mode=True))
     # print(func.get_source('asm'))
 
     ad_emb_np = np.random.uniform(size=(batch_size, emb_size)).astype(ad_emb.dtype)
@@ -167,36 +168,36 @@ def deep_wide(target, batch_size=128, split_concat=True, num_features=50, emb_si
 
 
 def deep_wide_transpose(target, batch_size=128, num_features=100, emb_size=32):
-    ad_emb = tvm.placeholder((emb_size, batch_size), name="ad_emb")
-    usr_emb = tvm.placeholder((emb_size, 1), name="usr_emb")
-    wide = tvm.placeholder((num_features, batch_size), name="wide")
+    ad_emb = te.placeholder((emb_size, batch_size), name="ad_emb")
+    usr_emb = te.placeholder((emb_size, 1), name="usr_emb")
+    wide = te.placeholder((num_features, batch_size), name="wide")
 
-    fc_w_emb = tvm.placeholder((1, num_features), name="fc_w_emb")
-    fc_w_dp = tvm.placeholder((1, 1), name="fc_w_dp")
-    fc_b = tvm.placeholder((1,), name="fc_b")
+    fc_w_emb = te.placeholder((1, num_features), name="fc_w_emb")
+    fc_w_dp = te.placeholder((1, 1), name="fc_w_dp")
+    fc_b = te.placeholder((1,), name="fc_b")
 
-    k1 = tvm.reduce_axis((0, emb_size), "k1")
-    dp = tvm.compute(
+    k1 = te.reduce_axis((0, emb_size), "k1")
+    dp = te.compute(
         (batch_size, 1),
-        lambda i, j: tvm.sum(ad_emb[k1, i] * usr_emb[k1, j], axis=k1),
+        lambda i, j: te.sum(ad_emb[k1, i] * usr_emb[k1, j], axis=k1),
         name="dp",
     )
     concat = topi.concatenate((dp, wide), axis=1)
-    k2 = tvm.reduce_axis((0, num_features), "k2")
-    k_dp = tvm.reduce_axis((0, 1), "k_dp")
-    fc_dp = tvm.compute(
+    k2 = te.reduce_axis((0, num_features), "k2")
+    k_dp = te.reduce_axis((0, 1), "k_dp")
+    fc_dp = te.compute(
         (batch_size, 1), lambda i, j: dp[i, j] * fc_w_dp[0, j], name="fc_dp"
     )
 
-    fc_emb = tvm.compute(
+    fc_emb = te.compute(
         (batch_size, 1),
-        lambda i, j: tvm.sum(wide[k2, i] * fc_w_emb[j, k2], axis=k2),
+        lambda i, j: te.sum(wide[k2, i] * fc_w_emb[j, k2], axis=k2),
         name="fc_emb",
     )
     fc_out = topi.add(topi.add(fc_emb, fc_b), fc_dp)
     out = topi.nn.relu(fc_out)
-    s = tvm.create_schedule(out.op)
-    tvm.schedule.AutoInlineInjective(s)
+    s = te.create_schedule(out.op)
+    te.schedule.AutoInlineInjective(s)
     x, y = s[out].op.axis
     if batch_size >= 4:
         (m, n) = s[fc_emb].op.axis
@@ -219,7 +220,7 @@ def deep_wide_transpose(target, batch_size=128, num_features=100, emb_size=32):
         target=target,
         name="fused_op",
     )
-    # print(tvm.lower(s, [ad_emb, usr_emb, wide, fc_w_emb, fc_w_dp,  fc_b, out], simple_mode=True))
+    print(tvm.lower(s, [ad_emb, usr_emb, wide, fc_w_emb, fc_w_dp,  fc_b, out], simple_mode=True))
     # print(func.get_source('asm'))
 
     ad_emb_np = np.random.uniform(size=(emb_size, batch_size)).astype(ad_emb.dtype)
@@ -263,24 +264,24 @@ def deep_wide_transpose(target, batch_size=128, num_features=100, emb_size=32):
 
 
 def deep_wide_dot(target, batch_size=128, num_features=50, emb_size=32):
-    ad_emb = tvm.placeholder((batch_size, emb_size), name="ad_emb")
-    usr_emb = tvm.placeholder((1, emb_size), name="usr_emb")
-    wide = tvm.placeholder((batch_size, num_features), name="wide")
+    ad_emb = te.placeholder((batch_size, emb_size), name="ad_emb")
+    usr_emb = te.placeholder((1, emb_size), name="usr_emb")
+    wide = te.placeholder((batch_size, num_features), name="wide")
 
-    fc_w = tvm.placeholder((emb_size, num_features), name="fc_w")
-    fc_b = tvm.placeholder((emb_size,), name="fc_b")
+    fc_w = te.placeholder((emb_size, num_features), name="fc_w")
+    fc_b = te.placeholder((emb_size,), name="fc_b")
 
-    fc_w_linear = tvm.placeholder((1, 1), name="fc_w_linear")
-    fc_b_linear = tvm.placeholder((1,), name="fc_b_linear")
+    fc_w_linear = te.placeholder((1, 1), name="fc_w_linear")
+    fc_b_linear = te.placeholder((1,), name="fc_b_linear")
 
     # Add + Mul, ReplaceNaN, Clip
-    mu = tvm.placeholder((1, num_features), name="mu")
-    sigma = tvm.placeholder((1, num_features), name="sigma")
+    mu = te.placeholder((1, num_features), name="mu")
+    sigma = te.placeholder((1, num_features), name="sigma")
 
     wide_normalized = topi.multiply(topi.add(wide, mu), sigma)
-    wide_noNaN = tvm.compute(
+    wide_noNaN = te.compute(
         (batch_size, num_features),
-        lambda i, j: tvm.if_then_else(
+        lambda i, j: tvm.tir.if_then_else(
             topi.isnan(wide_normalized)[i, j], 0, wide_normalized[i, j]
         ),
         name="wide_noNaN",
@@ -289,33 +290,33 @@ def deep_wide_dot(target, batch_size=128, num_features=50, emb_size=32):
     wide_preproc = topi.clip(wide_noNaN, -10.0, 10.0)
 
     # wide [batch_size, num_feature] => [batch_size, emb_size]
-    k = tvm.reduce_axis((0, num_features), "k")
-    wide_fc = tvm.compute(
+    k = te.reduce_axis((0, num_features), "k")
+    wide_fc = te.compute(
         (batch_size, emb_size),
-        lambda i, j: tvm.sum(wide_preproc[i, k] * fc_w[j, k], axis=k),
+        lambda i, j: te.sum(wide_preproc[i, k] * fc_w[j, k], axis=k),
         name="fc",
     )
     wide_fc = topi.nn.relu(topi.add(wide_fc, fc_b))
 
     # batch_matmul + flatten => matmul
-    k0 = tvm.reduce_axis((0, emb_size), "k0")
-    k1 = tvm.reduce_axis((0, emb_size), "k1")
-    k2 = tvm.reduce_axis((0, emb_size), "k2")
-    dp0 = tvm.compute(
+    k0 = te.reduce_axis((0, emb_size), "k0")
+    k1 = te.reduce_axis((0, emb_size), "k1")
+    k2 = te.reduce_axis((0, emb_size), "k2")
+    dp0 = te.compute(
         (batch_size, 1),
-        lambda i, j: tvm.sum(ad_emb[i, k0] * usr_emb[j, k0], axis=k0),
+        lambda i, j: te.sum(ad_emb[i, k0] * usr_emb[j, k0], axis=k0),
         name="dp0",
     )
 
-    dp1 = tvm.compute(
+    dp1 = te.compute(
         (batch_size, 1),
-        lambda i, j: tvm.sum(ad_emb[i, k1] * wide_fc[i, k1], axis=k1),
+        lambda i, j: te.sum(ad_emb[i, k1] * wide_fc[i, k1], axis=k1),
         name="dp1",
     )
 
-    dp2 = tvm.compute(
+    dp2 = te.compute(
         (batch_size, 1),
-        lambda i, j: tvm.sum(usr_emb[j, k2] * wide_fc[i, k2], axis=k2),
+        lambda i, j: te.sum(usr_emb[j, k2] * wide_fc[i, k2], axis=k2),
         name="dp2",
     )
 
@@ -323,8 +324,8 @@ def deep_wide_dot(target, batch_size=128, num_features=50, emb_size=32):
     linear = topi.nn.relu(topi.add(topi.multiply(sum, fc_w_linear), fc_b_linear))
     out = topi.sigmoid(linear)
 
-    s = tvm.create_schedule(out.op)
-    tvm.schedule.AutoInlineInjective(s)
+    s = te.create_schedule(out.op)
+    te.schedule.AutoInlineInjective(s)
     x, y = s[out].op.axis
     fused = s[out].fuse(x, y)
 
